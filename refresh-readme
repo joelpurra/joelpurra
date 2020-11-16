@@ -43,11 +43,7 @@ map(
             )"
         ))](\\(
             @html "\\(
-                if .source_post_url | length > 0 then
-                    .source_post_url
-                else
-                    .url
-                end
+                .url
             )"
         ))"
     catch
