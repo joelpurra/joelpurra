@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+
+set -e
+set -u
+set -o pipefail
+
+[[ -z "$GIPHY_API_KEY" ]] && echo "The GIPHY_API_KEY was not defined." && exit 1
+
+declare -r -i README_IMAGES_MAX_COUNT="${README_IMAGES_MAX_COUNT:-9}"
+declare -r GIPHY_SEARCH_TERMS="${GIPHY_SEARCH_TERMS:-random}"
+
+# NOTE: since the returned images are client-side filtered, fetch some extra to cover for mismatches.
+declare -r -i README_IMAGES_MISMATCH_RATIO="${README_IMAGES_MISMATCH_RATIO:-2}"
+
+read -d '' JQ_README_TEMPLATE <<-"EOF" || true
+map(
+    select(
+        .meta.msg == "OK"
+        and .data.type == "gif"
+        and (
+            (.data.rating | ascii_downcase) as $rating
+            | [
+                "g",
+                "pg",
+                "pg-13"
+            ]
+            | contains([
+                $rating
+            ])
+        )
+    )
+)
+| unique_by(.data.id)
+| map(
+    try
+        "[![\\(
+            @html "\\(
+                .data.title
+            )"
+        ) via \\(
+            @html "\\(
+                if .data.source_tld | length > 0 then
+                    .data.source_tld
+                else
+                    "giphy.com"
+                end
+            )"
+        )](\\(
+            @html "\\(
+                .data.images.fixed_height_small.webp
+            )"
+        ))](\\(
+            @html "\\(
+                if .data.source_post_url | length > 0 then
+                    .data.source_post_url
+                else
+                    .data.url
+                end
+            )"
+        ))"
+    catch
+        empty
+)
+| map(
+    select(
+        length > 0
+    )
+)
+| .[
+    0:($MAX_RESULTS | tonumber)
+]
+| .[]
+EOF
+
+echo -n > "giphy-images.separate.json"
+
+{
+    for IMAGE_INDEX in $(seq 1 $(( "$README_IMAGES_MAX_COUNT" * "$README_IMAGES_MISMATCH_RATIO" )));
+    do
+        declare -i GIPHY_API_WEIRDNESS="$(( "$IMAGE_INDEX" > 10 ? 10 : "$IMAGE_INDEX" ))"
+        declare GIPHY_API_RANDOM_ID="$({ hostname; date '+%s.%N'; } | md5sum | cut --delimiter ' ' --fields 1)"
+        curl \
+            --get \
+            --data-urlencode "api_key=${GIPHY_API_KEY}" \
+            --data-urlencode "s=${GIPHY_SEARCH_TERMS}" \
+            --data-urlencode "weirdness=${GIPHY_API_WEIRDNESS}" \
+            --data-urlencode "random_id=${GIPHY_API_RANDOM_ID}" \
+            "https://api.giphy.com/v1/gifs/translate"
+    done;
+} > "giphy-images.separate.json"
+
+echo -n > README.md
+
+jq \
+    --slurp \
+    --join-output \
+    --arg MAX_RESULTS "$README_IMAGES_MAX_COUNT" \
+    "$JQ_README_TEMPLATE" \
+    "giphy-images.separate.json" >> README.md
+
+echo -e "<br />\n<details><summary>\"${GIPHY_SEARCH_TERMS}\"</summary><img height=\"18\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFQAAAASCAYAAADFavmwAAACGElEQVRYhe2YPUrEQBTH9wg5go1oKVoL6cTOWiwWi60E9wg5QqrFrdwjKAiCIARsLXKEnEACVlv9LDJxsy9vMjPZLKwff5gmb77+v8x7EzLi8wpbe3s5h8kEJhNG//KTBnL5ccnr0xn3d6cbAwViIGm0MbA3oIUdE3NGzK3AaqChYIEpUGJX1gRrwK/FGzEfPQBHHfO19m7rAxTicQlEYuye4q/YClBjzkdlDUExFwq01ngAoK3nwMLDYxwM1AUWSAPM55g3r5joC7SkOj29gZrYQpk7NrELJZaakcMBNUakcrOByMTHVCn1DbMH0AWrmpwp8WkXLE+gEe2Uzs1zWRKKlRcHUKnr/XtuD59tQOXpbCy01i+SzxVzXUBjMVZCfdgUqIlrJzHv3k8g0JuDR2bHSxtQaWwqYmobAKhMz0yDpazdgqN4ct0HiRgRBnR2vGR+0l7YZbxrRz2A1ikdU5UQmZqJMp+XFE/abV4rVyiEAZ2fsAtAXTpS5vOSxdfUts62gcoUsqX8WlEfGGhqmQ96pHyHt9TSc1Cgspa1PohNv0SaUACEAi1Zf4EbX0qir7wfEkvPQYFqp6KgqnMR1a2ZsvkJbdbQGHFJ+cLaeaCWhZ2ymMsac0rFrn3+JqAR+reaTWOLuawx598FahaPqOpk18+RArjoMJc1Yj8I6Dv0ap5C/32nfG4MK/NSXXXW2SdcWwb61/QFdiU5InHRidgAAAAASUVORK5CYII=\" /><br /><a href="https://giphy.com/">Powered By GIPHY</a></details>" >> README.md
