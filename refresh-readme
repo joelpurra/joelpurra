@@ -10,6 +10,9 @@ declare -r -i README_IMAGES_MAX_COUNT="${README_IMAGES_MAX_COUNT:-9}"
 declare -r GIPHY_SEARCH_TERMS="${GIPHY_SEARCH_TERMS:-random}"
 
 read -d '' JQ_README_TEMPLATE <<-"EOF" || true
+def slightlyRandom:
+    now * 1000 * 1000;
+
 map(
     .data
 )
@@ -20,8 +23,8 @@ map(
 | sort_by(
     .id
     | explode
+    | map((. * slightlyRandom * 10) % 13)
     | add
-    | ((. * now) % 13)
 )
 | map(
     try
