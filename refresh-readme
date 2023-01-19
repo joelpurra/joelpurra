@@ -1,111 +1,166 @@
 #!/usr/bin/env bash
 
-set -e
-set -u
+set -o errexit
+set -o noclobber
+set -o nounset
 set -o pipefail
 
-[[ -z "$GIPHY_API_KEY" ]] && echo "The GIPHY_API_KEY was not defined." && exit 1
+function die() {
+	echo "FATAL:" "$@" >&2
+	exit 1
+}
 
-declare -r -i README_IMAGES_MAX_COUNT="${README_IMAGES_MAX_COUNT:-9}"
-declare -r GIPHY_SEARCH_TERMS="${GIPHY_SEARCH_TERMS:-random}"
+# NOTE: go to Giphy and "apply" for an API key.
+# https://developers.giphy.com/docs/api/
+[[ -n "$GIPHY_API_KEY" ]] || die "the GIPHY_API_KEY was not defined."
 
-read -d '' JQ_README_TEMPLATE <<-"EOF" || true
+# NOTE: most values can be overridden with external environment variables.
+declare -r GIPHY_SEARCH_TERMS="${GIPHY_SEARCH_TERMS:-"random"}"
+
+declare -r -i README_IMAGES_MAX_COUNT="${README_IMAGES_MAX_COUNT:-"9"}"
+
+# ---
+
+function cleanup() {
+	rm --force "$GIPHY_SEARCH_TEMP_FILE_NAME"
+}
+
+# shellcheck disable=SC2016
+declare -r JQ_README_TEMPLATE='
 def slightlyRandom:
-    now * 1000 * 1000;
+	now
+	* (
+		# NOTE: discard sub-second resolution to get an integer.
+		6
+		| exp10
+	);
+
+def pickRandom:
+	.[
+		slightlyRandom
+		% length
+	];
 
 map(
-    .data
+	.data
 )
 | add
 | unique_by(
-    .id
+	.id
 )
 | sort_by(
-    .id
-    | explode
-    | map((. * slightlyRandom * 10) % 13)
-    | add
+	# NOTE: random image sorting by picking a few random bytes from the (sequentially generated, but in random-ish search results) id string.
+	.id as $id
+	| .id
+	| explode
+	| [
+		pickRandom,
+		pickRandom,
+		pickRandom,
+		pickRandom,
+		pickRandom
+	]
+	| add
 )
 | map(
-    try
-        "[![\\(
-            @html "\\(
-                .title
-            )"
-        ) via \\(
-            @html "\\(
-                if .source_tld | length > 0 then
-                    .source_tld
-                else
-                    "giphy.com"
-                end
-            )"
-        )](\\(
-            @html "\\(
-                .images.fixed_height_small.webp
-            )"
-        ))](\\(
-            @html "\\(
-                .url
-            )"
-        ))"
-    catch
-        empty
+	try
+		"[![\(
+			@html "\(
+				.title
+			)"
+		) via \(
+			@html "\(
+				if .source_tld | length > 0 then
+					.source_tld
+				else
+					"giphy.com"
+				end
+			)"
+		)](\(
+			@html "\(
+				.images.fixed_height_small.webp
+			)"
+		))](\(
+			@html "\(
+				.url
+			)"
+		))"
+	catch
+		empty
 )
 | map(
-    select(
-        length > 0
-    )
+	select(
+		length > 0
+	)
 )
 | .[
-    0:($MAX_RESULTS | tonumber)
+	0:($MAX_RESULTS | tonumber)
 ]
 | .[]
-EOF
+'
 
-declare GIPHY_SEARCH_RESULT_LIMIT="50"
-declare GIPHY_SEARCH_RESULT_RATING="pg"
-declare GIPHY_API_RANDOM_ID="$({ hostname; date '+%s.%N'; } | md5sum | cut --delimiter ' ' --fields 1)"
+declare -r README_FILE_NAME="${README_FILE_NAME:-"README.md"}"
 
-echo -n > "giphy-images.separate.json"
+declare -r -i GIPHY_SEARCH_RESULT_LIMIT="${GIPHY_SEARCH_RESULT_LIMIT:-"50"}"
+declare -r GIPHY_SEARCH_RESULT_RATING="${GIPHY_SEARCH_RESULT_RATING:-"pg"}"
+declare -r GIPHY_SEARCH_TEMP_FILE_NAME="${GIPHY_SEARCH_TEMP_FILE_NAME:-".giphy-images.separate.json~"}"
+
+declare GIPHY_API_RANDOM_ID
+GIPHY_API_RANDOM_ID="$({ hostname ; date '+%s.%N' ; } | md5sum | cut --delimiter ' ' --fields 1)"
+
+# ---
+
+trap cleanup EXIT
+
+# NOTE: touch/clear the file.
+set +o noclobber
+: > "$GIPHY_SEARCH_TEMP_FILE_NAME"
+set -o noclobber
+
+# NOTE: using images from both trending and search term api results to get more variation.
+curl \
+	--silent \
+	--show-error \
+	--get \
+	--data-urlencode "api_key=${GIPHY_API_KEY}" \
+	--data-urlencode "limit=${GIPHY_SEARCH_RESULT_LIMIT}" \
+	--data-urlencode "rating=${GIPHY_SEARCH_RESULT_RATING}" \
+	--data-urlencode "random_id=${GIPHY_API_RANDOM_ID}" \
+	"https://api.giphy.com/v1/gifs/trending" >> "$GIPHY_SEARCH_TEMP_FILE_NAME"
 
 curl \
-    --get \
-    --data-urlencode "api_key=${GIPHY_API_KEY}" \
-    --data-urlencode "limit=${GIPHY_SEARCH_RESULT_LIMIT}" \
-    --data-urlencode "rating=${GIPHY_SEARCH_RESULT_RATING}" \
-    --data-urlencode "random_id=${GIPHY_API_RANDOM_ID}" \
-    "api.giphy.com/v1/gifs/trending" >> "giphy-images.separate.json"
-
-curl \
-    --get \
-    --data-urlencode "api_key=${GIPHY_API_KEY}" \
-    --data-urlencode "q=${GIPHY_SEARCH_TERMS}" \
-    --data-urlencode "limit=${GIPHY_SEARCH_RESULT_LIMIT}" \
-    --data-urlencode "rating=${GIPHY_SEARCH_RESULT_RATING}" \
-    --data-urlencode "random_id=${GIPHY_API_RANDOM_ID}" \
-    "https://api.giphy.com/v1/gifs/search" >> "giphy-images.separate.json"
+	--silent \
+	--show-error \
+	--get \
+	--data-urlencode "api_key=${GIPHY_API_KEY}" \
+	--data-urlencode "q=${GIPHY_SEARCH_TERMS}" \
+	--data-urlencode "limit=${GIPHY_SEARCH_RESULT_LIMIT}" \
+	--data-urlencode "rating=${GIPHY_SEARCH_RESULT_RATING}" \
+	--data-urlencode "random_id=${GIPHY_API_RANDOM_ID}" \
+	"https://api.giphy.com/v1/gifs/search" >> "$GIPHY_SEARCH_TEMP_FILE_NAME"
 
 # NOTE: not removing the file, merely replacing the contents.
-echo -n > README.md
+set +o noclobber
+: > "$README_FILE_NAME"
+set -o noclobber
 
 {
-    jq \
-        --slurp \
-        --join-output \
-        --arg MAX_RESULTS "$README_IMAGES_MAX_COUNT" \
-        "$JQ_README_TEMPLATE" \
-        "giphy-images.separate.json"
+	jq \
+		--slurp \
+		--join-output \
+		--arg MAX_RESULTS "$README_IMAGES_MAX_COUNT" \
+		"$JQ_README_TEMPLATE" \
+		"$GIPHY_SEARCH_TEMP_FILE_NAME"
 
-    # TODO: templating.
-    echo '<br />'
-    echo -n '<details>'
-    echo -n '<summary>'
-    echo -n '<a href="https://giphy.com/trending-gifs" target="_blank">Trending</a> + '
-    echo -n "<a href=\"https://giphy.com/search/${GIPHY_SEARCH_TERMS// /-}\" target=\"_blank\">\"${GIPHY_SEARCH_TERMS}\"</a>"
-    echo -n '</summary>'
-    echo -n '<img height="18" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFQAAAASCAYAAADFavmwAAACGElEQVRYhe2YPUrEQBTH9wg5go1oKVoL6cTOWiwWi60E9wg5QqrFrdwjKAiCIARsLXKEnEACVlv9LDJxsy9vMjPZLKwff5gmb77+v8x7EzLi8wpbe3s5h8kEJhNG//KTBnL5ccnr0xn3d6cbAwViIGm0MbA3oIUdE3NGzK3AaqChYIEpUGJX1gRrwK/FGzEfPQBHHfO19m7rAxTicQlEYuye4q/YClBjzkdlDUExFwq01ngAoK3nwMLDYxwM1AUWSAPM55g3r5joC7SkOj29gZrYQpk7NrELJZaakcMBNUakcrOByMTHVCn1DbMH0AWrmpwp8WkXLE+gEe2Uzs1zWRKKlRcHUKnr/XtuD59tQOXpbCy01i+SzxVzXUBjMVZCfdgUqIlrJzHv3k8g0JuDR2bHSxtQaWwqYmobAKhMz0yDpazdgqN4ct0HiRgRBnR2vGR+0l7YZbxrRz2A1ikdU5UQmZqJMp+XFE/abV4rVyiEAZ2fsAtAXTpS5vOSxdfUts62gcoUsqX8WlEfGGhqmQ96pHyHt9TSc1Cgspa1PohNv0SaUACEAi1Zf4EbX0qir7wfEkvPQYFqp6KgqnMR1a2ZsvkJbdbQGHFJ+cLaeaCWhZ2ymMsac0rFrn3+JqAR+reaTWOLuawx598FahaPqOpk18+RArjoMJc1Yj8I6Dv0ap5C/32nfG4MK/NSXXXW2SdcWwb61/QFdiU5InHRidgAAAAASUVORK5CYII=" />'
-    echo -n '<br />'
-    echo -n '<a href="https://giphy.com/" target="_blank">Powered By GIPHY</a>'
-    echo -n '</details>'
-} >> README.md
+	# TODO: templating.
+	echo '<br />'
+	echo -n '<details>'
+	echo -n '<summary>'
+	echo -n '<a href="https://giphy.com/trending-gifs" target="_blank">Trending</a> + '
+	echo -n "<a href=\"https://giphy.com/search/${GIPHY_SEARCH_TERMS// /-}\" target=\"_blank\">\"${GIPHY_SEARCH_TERMS}\"</a>"
+	echo -n '</summary>'
+	echo -n '<img height="18" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFQAAAASCAYAAADFavmwAAACGElEQVRYhe2YPUrEQBTH9wg5go1oKVoL6cTOWiwWi60E9wg5QqrFrdwjKAiCIARsLXKEnEACVlv9LDJxsy9vMjPZLKwff5gmb77+v8x7EzLi8wpbe3s5h8kEJhNG//KTBnL5ccnr0xn3d6cbAwViIGm0MbA3oIUdE3NGzK3AaqChYIEpUGJX1gRrwK/FGzEfPQBHHfO19m7rAxTicQlEYuye4q/YClBjzkdlDUExFwq01ngAoK3nwMLDYxwM1AUWSAPM55g3r5joC7SkOj29gZrYQpk7NrELJZaakcMBNUakcrOByMTHVCn1DbMH0AWrmpwp8WkXLE+gEe2Uzs1zWRKKlRcHUKnr/XtuD59tQOXpbCy01i+SzxVzXUBjMVZCfdgUqIlrJzHv3k8g0JuDR2bHSxtQaWwqYmobAKhMz0yDpazdgqN4ct0HiRgRBnR2vGR+0l7YZbxrRz2A1ikdU5UQmZqJMp+XFE/abV4rVyiEAZ2fsAtAXTpS5vOSxdfUts62gcoUsqX8WlEfGGhqmQ96pHyHt9TSc1Cgspa1PohNv0SaUACEAi1Zf4EbX0qir7wfEkvPQYFqp6KgqnMR1a2ZsvkJbdbQGHFJ+cLaeaCWhZ2ymMsac0rFrn3+JqAR+reaTWOLuawx598FahaPqOpk18+RArjoMJc1Yj8I6Dv0ap5C/32nfG4MK/NSXXXW2SdcWwb61/QFdiU5InHRidgAAAAASUVORK5CYII=" />'
+	echo -n '<br />'
+	echo -n '<a href="https://giphy.com/" target="_blank">Powered By GIPHY</a>'
+	echo -n '</details>'
+} >> "$README_FILE_NAME"
